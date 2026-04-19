@@ -1,0 +1,102 @@
+name: Deploy Streamlit to App Runner
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "**"
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  APP_RUNNER_SERVICE_NAME: ${{ vars.APP_RUNNER_SERVICE_NAME }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          docker tag "$IMAGE_URI" "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Create App Runner request file
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+          cp deploy/apprunner-service.template.json deploy/apprunner-service.generated.json
+          sed -i "s|__SERVICE_NAME__|$APP_RUNNER_SERVICE_NAME|g" deploy/apprunner-service.generated.json
+          sed -i "s|__IMAGE_IDENTIFIER__|$IMAGE_URI|g" deploy/apprunner-service.generated.json
+
+      - name: Create or update App Runner service
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+          APP_RUNNER_SERVICE_ARN: ${{ secrets.APP_RUNNER_SERVICE_ARN }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${APP_RUNNER_SERVICE_ARN:-}" ]; then
+            cat > deploy/apprunner-update.generated.json <<EOF
+          {
+            "ServiceArn": "$APP_RUNNER_SERVICE_ARN",
+            "SourceConfiguration": {
+              "AutoDeploymentsEnabled": true,
+              "ImageRepository": {
+                "ImageIdentifier": "$IMAGE_URI",
+                "ImageRepositoryType": "ECR",
+                "ImageConfiguration": {
+                  "Port": "8501",
+                  "RuntimeEnvironmentVariables": {
+                    "STREAMLIT_SERVER_HEADLESS": "true",
+                    "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false"
+                  }
+                }
+              }
+            }
+          }
+          EOF
+            aws apprunner update-service --cli-input-json file://deploy/apprunner-update.generated.json
+          else
+            aws apprunner create-service --cli-input-json file://deploy/apprunner-service.generated.json
+          fi
+
+      - name: Show App Runner service URL
+        env:
+          APP_RUNNER_SERVICE_ARN: ${{ secrets.APP_RUNNER_SERVICE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_RUNNER_SERVICE_ARN:-}" ]; then
+            aws apprunner describe-service --service-arn "$APP_RUNNER_SERVICE_ARN" \
+              --query 'Service.ServiceUrl' --output text
+          else
+            echo "Service ARN was not provided. Copy the ARN from create-service output and add APP_RUNNER_SERVICE_ARN secret for future updates."
+          fi

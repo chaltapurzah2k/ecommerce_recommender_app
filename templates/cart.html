@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cart</title>
+</head>
+<body>
+    <h1>Your Cart</h1>
+
+    {% set total = 0 %}
+    {% for item in items %}
+        {% set subtotal = item.quantity * item.price %}
+        {% set total = total + subtotal %}
+        <p>Item: {{ item.name }} | Qty: {{ item.quantity }} | Subtotal: ₹{{ subtotal }}</p>
+    {% endfor %}
+
+    {% if items|length == 0 %}
+        <p>Your cart is empty.</p>
+    {% else %}
+        <h3>Total: ₹{{ total }}</h3>
+    {% endif %}
+
+    <a href="/">Back to Shop</a>
+</body>
+</html>

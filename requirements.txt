@@ -1,0 +1,24 @@
+flask
+streamlit
+psycopg2-binary
+python-dotenv
+kafka-python
+pandas
+scikit-learn
+lightgbm
+xgboost
+redis
+datasets
+torch
+transformers
+pillow
+sentence-transformers
+requests
+rank-bm25
+faiss-cpu
+# Chatbot dependencies
+langchain
+langchain-core
+langchain-groq
+langgraph
+groq

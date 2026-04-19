@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+        <title>E-commerce App</title>
+</head>
+<body>
+    <h1>Clothing Store</h1>
+        <p>Items: shoes, t-shirt, skirt, shorts</p>
+
+    {% for product in products %}
+                <div style="margin:20px;" data-product-id="{{ product.id }}">
+            <img src="{{ product.image_url }}" width="150">
+            <h3>{{ product.name }}</h3>
+            <p>₹{{ product.price }}</p>
+
+                        <a href="/click/{{ product.id }}" class="view-link" data-product-id="{{ product.id }}">View</a><br>
+            <a href="/add_to_cart/{{ product.id }}">Add to Cart</a>
+        </div>
+    {% endfor %}
+
+        <script>
+            let activeItemId = null;
+            let activeStart = null;
+
+            function logTimeSpent(itemId, seconds) {
+                if (!itemId || seconds <= 0) return;
+                fetch(`/time_spent/${itemId}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ seconds })
+                });
+            }
+
+            document.querySelectorAll(".view-link").forEach((link) => {
+                link.addEventListener("click", () => {
+                    const itemId = Number(link.dataset.productId);
+                    const now = Date.now();
+                    if (activeItemId && activeStart) {
+                        logTimeSpent(activeItemId, (now - activeStart) / 1000);
+                    }
+                    activeItemId = itemId;
+                    activeStart = now;
+                });
+            });
+
+            window.addEventListener("beforeunload", () => {
+                if (activeItemId && activeStart) {
+                    const elapsed = (Date.now() - activeStart) / 1000;
+                    navigator.sendBeacon(
+                        `/time_spent/${activeItemId}`,
+                        new Blob([JSON.stringify({ seconds: elapsed })], { type: "application/json" })
+                    );
+                }
+            });
+        </script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "ServiceName": "__SERVICE_NAME__",
+  "SourceConfiguration": {
+    "AutoDeploymentsEnabled": true,
+    "ImageRepository": {
+      "ImageIdentifier": "__IMAGE_IDENTIFIER__",
+      "ImageRepositoryType": "ECR",
+      "ImageConfiguration": {
+        "Port": "8501",
+        "RuntimeEnvironmentVariables": {
+          "STREAMLIT_SERVER_HEADLESS": "true",
+          "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false"
+        }
+      }
+    }
+  },
+  "InstanceConfiguration": {
+    "Cpu": "1 vCPU",
+    "Memory": "2 GB"
+  },
+  "HealthCheckConfiguration": {
+    "Protocol": "TCP",
+    "Path": "/",
+    "Interval": 10,
+    "Timeout": 5,
+    "HealthyThreshold": 1,
+    "UnhealthyThreshold": 5
+  }
+}
