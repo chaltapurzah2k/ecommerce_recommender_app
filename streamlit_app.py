@@ -5,6 +5,7 @@ import os
 import re
 import time
 import uuid
+import tempfile
 from datetime import datetime, timezone
 
 import boto3
@@ -30,6 +31,54 @@ load_dotenv()
 S3_BUCKET = os.getenv("S3_BUCKET_NAME", "myntra-project-new")
 S3_REGION = os.getenv("S3_REGION", "eu-north-1")
 _INVALID_IMAGE_VALUES = {"", "0", "none", "null", "nan", "n/a"}
+_DB_UNAVAILABLE = False
+_LOCAL_STATE_DIR = os.path.join(os.path.dirname(__file__), "data", "local_runtime")
+
+
+def _ensure_local_state_dir() -> str:
+    try:
+        os.makedirs(_LOCAL_STATE_DIR, exist_ok=True)
+        return _LOCAL_STATE_DIR
+    except Exception:
+        fallback_dir = os.path.join(tempfile.gettempdir(), "ecommerce_local_runtime")
+        os.makedirs(fallback_dir, exist_ok=True)
+        return fallback_dir
+
+
+def _local_state_file(name: str) -> str:
+    return os.path.join(_ensure_local_state_dir(), name)
+
+
+def _local_events_csv_path() -> str:
+    return _local_state_file("event_logs_local.csv")
+
+
+def _load_local_json(name: str, default):
+    path = _local_state_file(name)
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save_local_json(name: str, payload) -> None:
+    path = _local_state_file(name)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=True, indent=2)
+
+
+def _get_connection_or_none():
+    global _DB_UNAVAILABLE
+    if _DB_UNAVAILABLE:
+        return None
+    try:
+        return get_connection()
+    except Exception:
+        _DB_UNAVAILABLE = True
+        return None
 
 if KafkaProducer is not None:
     try:
@@ -417,7 +466,9 @@ def quote_identifier(identifier: str) -> str:
 
 
 def init_auth_db() -> None:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        return
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -454,7 +505,9 @@ def init_auth_db() -> None:
 
 
 def init_db() -> None:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        return
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -655,7 +708,16 @@ def upsert_user_profile(name: str, email: str) -> None:
     clean_name = name.strip()
     clean_email = email.strip().lower()
 
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        profiles = _load_local_json("user_profiles.json", {})
+        profiles[clean_email] = {
+            "name": clean_name,
+            "email": clean_email,
+            "last_login_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_local_json("user_profiles.json", profiles)
+        return
     try:
         with conn.cursor() as cur:
             cur.execute("SET LOCAL lock_timeout = '2s'")
@@ -677,7 +739,26 @@ def upsert_user_profile(name: str, email: str) -> None:
 
 
 def start_user_session(user_id: str) -> int:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        sessions = _load_local_json("sessions.json", [])
+        next_id = max([int(s.get("id", 0)) for s in sessions], default=0) + 1
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for s in sessions:
+            if str(s.get("user_id")) == str(user_id) and bool(s.get("is_active")):
+                s["is_active"] = False
+                s["ended_at"] = now_iso
+        sessions.append(
+            {
+                "id": next_id,
+                "user_id": str(user_id),
+                "started_at": now_iso,
+                "ended_at": None,
+                "is_active": True,
+            }
+        )
+        _save_local_json("sessions.json", sessions)
+        return int(next_id)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -706,7 +787,16 @@ def start_user_session(user_id: str) -> int:
 def end_user_session(session_id: int | None) -> None:
     if session_id is None:
         return
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        sessions = _load_local_json("sessions.json", [])
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for s in sessions:
+            if int(s.get("id", -1)) == int(session_id):
+                s["is_active"] = False
+                s["ended_at"] = now_iso
+        _save_local_json("sessions.json", sessions)
+        return
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -737,7 +827,23 @@ def log_recommended_items(
     if not clean_ids:
         return
 
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        logs = _load_local_json("session_recommendations.json", [])
+        shown_at = datetime.now(timezone.utc).isoformat()
+        for item_id in clean_ids:
+            logs.append(
+                {
+                    "user_id": str(user_email),
+                    "user_email": str(user_email),
+                    "session_id": int(session_id) if session_id is not None else None,
+                    "item_id": int(item_id),
+                    "source": str(source),
+                    "shown_at": shown_at,
+                }
+            )
+        _save_local_json("session_recommendations.json", logs)
+        return
     try:
         with conn.cursor() as cur:
             cur.executemany(
@@ -754,7 +860,12 @@ def log_recommended_items(
 
 
 def fetch_user_sessions(user_id: str, limit: int = 10) -> list[dict]:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        sessions = _load_local_json("sessions.json", [])
+        user_sessions = [s for s in sessions if str(s.get("user_id")) == str(user_id)]
+        user_sessions.sort(key=lambda s: str(s.get("started_at") or ""), reverse=True)
+        return user_sessions[: int(limit)]
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -774,7 +885,9 @@ def fetch_user_sessions(user_id: str, limit: int = 10) -> list[dict]:
 
 @st.cache_data(ttl=180, show_spinner=False)
 def fetch_products_from_db() -> list[dict]:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        return enrich_catalog_products(load_products())
     try:
         with conn.cursor() as cur:
             product_columns = get_products_columns(cur)
@@ -825,7 +938,15 @@ def fetch_products_from_db() -> list[dict]:
 
 
 def fetch_events_dataframe() -> pd.DataFrame:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        events_csv = _local_events_csv_path()
+        if os.path.exists(events_csv):
+            try:
+                return pd.read_csv(events_csv)
+            except Exception:
+                pass
+        return pd.DataFrame(columns=["id", "user_id", "item_id", "event_type", "time_spent_seconds", "event_time"])
     query = "SELECT * FROM event_logs ORDER BY id DESC"
     try:
         return pd.read_sql(query, conn)
@@ -1260,8 +1381,26 @@ def log_event(user_id: str, item_id: int, event_type: str, time_spent_seconds=No
     # 1. Send to Kafka (real-time)
     log_event_to_kafka(event)
 
-    # 2. Store in PostgreSQL (permanent)
-    conn = get_connection()
+    # 2. Store in PostgreSQL when available, else local CSV fallback.
+    conn = _get_connection_or_none()
+    if conn is None:
+        events_csv = _local_events_csv_path()
+        row = {
+            "id": int(time.time() * 1000),
+            "user_id": str(user_id),
+            "item_id": int(item_id),
+            "event_type": str(event_type),
+            "time_spent_seconds": time_spent_seconds,
+            "event_time": datetime.now(timezone.utc).isoformat(),
+        }
+        os.makedirs(os.path.dirname(events_csv), exist_ok=True)
+        if os.path.exists(events_csv):
+            df = pd.read_csv(events_csv)
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([row])
+        df.to_csv(events_csv, index=False)
+        return
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1277,7 +1416,30 @@ def log_event(user_id: str, item_id: int, event_type: str, time_spent_seconds=No
 
 
 def add_to_cart_db(user_id: str, item_id: int, session_id: int | None = None) -> None:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        carts = _load_local_json("cart.json", [])
+        found = False
+        for row in carts:
+            if (
+                str(row.get("user_id")) == str(user_id)
+                and int(row.get("item_id", -1)) == int(item_id)
+                and ((row.get("session_id") is None and session_id is None) or int(row.get("session_id", -1)) == int(session_id or -1))
+            ):
+                row["quantity"] = int(row.get("quantity", 0)) + 1
+                found = True
+                break
+        if not found:
+            carts.append(
+                {
+                    "user_id": str(user_id),
+                    "session_id": int(session_id) if session_id is not None else None,
+                    "item_id": int(item_id),
+                    "quantity": 1,
+                }
+            )
+        _save_local_json("cart.json", carts)
+        return
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1307,7 +1469,23 @@ def add_to_cart_db(user_id: str, item_id: int, session_id: int | None = None) ->
 
 
 def fetch_cart(user_id: str, session_id: int | None = None) -> list[dict]:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        carts = _load_local_json("cart.json", [])
+        rows = []
+        for row in carts:
+            if str(row.get("user_id")) != str(user_id):
+                continue
+            stored_session = row.get("session_id")
+            if session_id is None:
+                if stored_session is not None:
+                    continue
+            else:
+                if int(stored_session or -1) != int(session_id):
+                    continue
+            rows.append({"item_id": int(row.get("item_id")), "quantity": int(row.get("quantity", 1))})
+        rows.sort(key=lambda r: r["item_id"])
+        return rows
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if session_id is None:
@@ -1336,7 +1514,13 @@ def fetch_cart(user_id: str, session_id: int | None = None) -> list[dict]:
 
 
 def fetch_recommendations(user_id: str, products: list[dict]) -> list[dict]:
-    conn = get_connection()
+    conn = _get_connection_or_none()
+    if conn is None:
+        product_map = {p["id"]: p for p in products if p.get("id") is not None}
+        if not product_map:
+            return []
+        # Local fallback: return first few products as simple recommendations.
+        return list(product_map.values())[:4]
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -1934,11 +2118,13 @@ def main() -> None:
     try:
         init_auth_db()
     except Exception as exc:
-        st.error(
-            "Unable to connect to PostgreSQL. Set DATABASE_URL or POSTGRES_HOST/PORT/DB/USER/PASSWORD."
+        st.warning(
+            "PostgreSQL unavailable. Running in local fallback mode (sessions/cart/events stored locally)."
         )
-        st.exception(exc)
-        return
+        st.caption(f"DB fallback reason: {exc}")
+
+    if _DB_UNAVAILABLE:
+        st.info("Running without PostgreSQL: using local fallback storage in data/local_runtime.")
 
     if "is_logged_in" not in st.session_state:
         st.session_state["is_logged_in"] = False
