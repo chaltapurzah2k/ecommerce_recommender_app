@@ -103,10 +103,43 @@ def log_event_to_kafka(event):
         pass
 
 
+def _resolve_products_json_path() -> str | None:
+    configured = os.getenv("PRODUCTS_JSON_PATH", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(configured)
+
+    app_dir = os.path.dirname(__file__)
+    cwd = os.getcwd()
+
+    candidates.extend(
+        [
+            os.path.join(app_dir, "data", "products.json"),
+            os.path.join(app_dir, "products.json"),
+            os.path.join(cwd, "data", "products.json"),
+            os.path.join(cwd, "products.json"),
+        ]
+    )
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_products() -> list[dict]:
-    with open("data/products.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+    products_path = _resolve_products_json_path()
+    if not products_path:
+        return []
+
+    try:
+        with open(products_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return []
+
+    return payload if isinstance(payload, list) else []
 
 
 def normalize_catalog_category(category: str | None) -> str:
