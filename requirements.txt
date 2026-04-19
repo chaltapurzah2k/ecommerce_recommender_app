@@ -22,3 +22,4 @@ langchain-core
 langchain-groq
 langgraph
 groq
+boto3
