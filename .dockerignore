@@ -25,7 +25,7 @@ kaggle.json
 
 # Data and notebooks (keep image small)
 *.ipynb
-data/
+data/*.pdf
 embeddings/models/*.pkl
 *.xlsx
 *.db
